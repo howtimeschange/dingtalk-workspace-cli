@@ -1,0 +1,66 @@
+{
+  "defaults": {
+    "mode": "draft",
+    "profile": "",
+    "query": "问题,反馈,bug,报错,不能用,需求",
+    "reply_target": "auto",
+    "ready_message": "",
+    "send": false,
+    "reply_engine": "codex",
+    "reply_skill": "laoxing",
+    "reply_skill_path": "~/.codex/skills/laoxing/SKILL.md",
+    "codex_audit_session_dir": "~/Documents/ChatGPT/钉钉分身会话",
+    "codex_proactive_followup": false,
+    "classifier": "heuristic",
+    "codex_execute": false
+  },
+  "groups": [
+    {
+      "name": "赢在AI",
+      "group": "cid_REPLACE_WINYAI",
+      "project": "winyai",
+      "repo": "",
+      "mode": "draft",
+      "reply_engine": "codex",
+      "query": "问题,反馈,bug,报错,不能用,需求",
+      "ready_message": "我在了",
+      "enabled": true
+    },
+    {
+      "name": "抓虾反馈群",
+      "group": "cid_REPLACE_CRAWSHRIMP",
+      "project": "crawshrimp",
+      "repo": "/ABS/PATH/TO/crawshrimp",
+      "mode": "guarded",
+      "reply_engine": "codex",
+      "code_keywords": ["抓虾", "crawshrimp"],
+      "query": "抓虾,AI视频,生图,鞋包,报错,不能用,需求",
+      "test_commands": ["python3 -m pytest"],
+      "enabled": true
+    },
+    {
+      "name": "Listingify / SHEIN API 测试群",
+      "group": "cid_REPLACE_LISTINGIFY",
+      "project": "listingify",
+      "repo": "/ABS/PATH/TO/Listingify",
+      "mode": "guarded",
+      "reply_engine": "codex",
+      "code_keywords": ["Listingify", "SHEIN"],
+      "query": "SHEIN,上新,草稿,发布,类目,尺码,报错,需求",
+      "test_commands": ["npm test"],
+      "enabled": true
+    },
+    {
+      "name": "深绘 AI 上新反馈群",
+      "group": "cid_REPLACE_DEEPDRAW",
+      "project": "deepdraw",
+      "repo": "/ABS/PATH/TO/Listingify",
+      "mode": "guarded",
+      "reply_engine": "codex",
+      "code_keywords": ["深绘", "deepdraw"],
+      "query": "深绘,AI上新,建档,尺码表,图片,类目,报错,需求",
+      "test_commands": ["npm test"],
+      "enabled": true
+    }
+  ]
+}
