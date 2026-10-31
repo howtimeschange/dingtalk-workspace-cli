@@ -33,6 +33,7 @@ MISSING = object()
 
 GROUP_ID_KEYS = ("group", "group_id", "id", "openConversationId", "open_conversation_id")
 REPO_KEYS = ("repo", "cwd")
+REPOS_KEYS = ("repos", "repo_paths", "repoPaths", "project_roots", "projectRoots")
 CODE_KEYWORD_KEYS = ("code_keywords", "codeKeywords", "repo_keywords", "repoKeywords")
 TEST_COMMAND_KEYS = ("test_commands", "testCommands", "test_command", "testCommand")
 REPLY_SKILL_KEYS = ("reply_skill", "replySkill")
@@ -40,6 +41,12 @@ REPLY_SKILL_PATH_KEYS = ("reply_skill_path", "replySkillPath")
 AUDIT_DIR_KEYS = ("codex_audit_session_dir", "codexAuditSessionDir", "audit_session_dir", "auditSessionDir")
 PROACTIVE_KEYS = ("codex_proactive_followup", "codexProactiveFollowup", "proactive_followup", "proactiveFollowup")
 WRITE_POLICY_KEYS = ("code_write_policy", "codeWritePolicy", "write_policy", "writePolicy")
+APPROVAL_SENDER_KEYS = (
+    "approval_senders",
+    "approvalSenders",
+    "approval_open_dingtalk_ids",
+    "approvalOpenDingtalkIds",
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,7 @@ class GroupRow:
     group_id: str
     project: str
     repo: str
+    repos: tuple[str, ...]
     mode: str
     trigger: str
     reply_engine: str
@@ -61,6 +69,7 @@ class GroupRow:
     history_context: bool
     history_context_limit: int
     codex_audit_session_dir: str
+    approval_senders: tuple[str, ...]
     query: str
     code_keywords: tuple[str, ...]
     test_commands: tuple[str, ...]
@@ -246,6 +255,7 @@ def group_row(index: int, group: dict[str, Any], defaults: dict[str, Any]) -> Gr
         history_limit=history_limit,
         proactive=proactive,
         audit_enabled=bool(audit_dir),
+        approval_sender_count=len(list_value(group, defaults, APPROVAL_SENDER_KEYS)),
     )
     return GroupRow(
         index=index,
@@ -254,6 +264,7 @@ def group_row(index: int, group: dict[str, Any], defaults: dict[str, Any]) -> Gr
         group_id=group_id,
         project=string_value(group, defaults, ("project",)),
         repo=string_value(group, defaults, REPO_KEYS),
+        repos=list_value(group, defaults, REPOS_KEYS),
         mode=mode,
         trigger=trigger,
         reply_engine=reply_engine,
@@ -265,6 +276,7 @@ def group_row(index: int, group: dict[str, Any], defaults: dict[str, Any]) -> Gr
         history_context=history_enabled,
         history_context_limit=history_limit,
         codex_audit_session_dir=audit_dir,
+        approval_senders=list_value(group, defaults, APPROVAL_SENDER_KEYS),
         query=string_value(group, defaults, ("query",)),
         code_keywords=list_value(group, defaults, CODE_KEYWORD_KEYS),
         test_commands=list_value(group, defaults, TEST_COMMAND_KEYS),
@@ -283,6 +295,7 @@ def permission_summary(
     history_limit: int,
     proactive: bool,
     audit_enabled: bool,
+    approval_sender_count: int,
 ) -> str:
     parts = [
         "send" if send else "draft",
@@ -294,6 +307,8 @@ def permission_summary(
         parts.append("proactive")
     if audit_enabled:
         parts.append("audit")
+    if code_write_policy == "approval":
+        parts.append(f"owner:{approval_sender_count}")
     return " ".join(parts)
 
 
@@ -359,6 +374,8 @@ def validate_config_document(doc: dict[str, Any]) -> ValidationResult:
             (errors if enabled else warnings).append(prefix + str(exc))
         if row.reply_engine not in {"ai", "codex"}:
             (errors if enabled else warnings).append(prefix + "reply_engine must be one of: ai, codex")
+        if row.enabled and row.code_write_policy == "approval" and not row.approval_senders:
+            warnings.append(prefix + "approval_senders is empty; code approvals will fail closed")
     if groups and not any_enabled:
         errors.append("at least one group must be enabled for the worker to start")
     if not errors and any_enabled:
@@ -456,7 +473,7 @@ def duplicate_group(doc: dict[str, Any], index: int) -> int:
 
 def set_group_field(doc: dict[str, Any], index: int, field: str, value: str) -> None:
     group = doc["groups"][index]
-    if field in {"code_keywords", "test_commands", "approval_phrases"}:
+    if field in {"repos", "code_keywords", "test_commands", "approval_phrases", "approval_senders"}:
         group[field] = [part.strip() for part in value.split(",") if part.strip()]
     elif field == "history_limit":
         group["history_context"] = {
@@ -598,9 +615,9 @@ class ConfigTui:
 
     def edit_selected(self) -> None:
         fields = (
-            "name", "group", "project", "repo", "query", "code_keywords",
+            "name", "group", "project", "repo", "repos", "query", "code_keywords",
             "test_commands", "reply_skill", "reply_skill_path",
-            "codex_audit_session_dir", "ready_message", "history_limit",
+            "codex_audit_session_dir", "approval_senders", "ready_message", "history_limit",
         )
         field = self.prompt("field " + "/".join(fields), "")
         if field not in fields:
@@ -612,12 +629,14 @@ class ConfigTui:
             "group": row.group_id,
             "project": row.project,
             "repo": row.repo,
+            "repos": ",".join(row.repos),
             "query": row.query,
             "code_keywords": ",".join(row.code_keywords),
             "test_commands": ",".join(row.test_commands),
             "reply_skill": row.reply_skill,
             "reply_skill_path": string_value(self.doc["groups"][self.selected], self.doc.get("defaults", {}), REPLY_SKILL_PATH_KEYS),
             "codex_audit_session_dir": row.codex_audit_session_dir,
+            "approval_senders": ",".join(row.approval_senders),
             "ready_message": as_string(self.doc["groups"][self.selected].get("ready_message"), ""),
             "history_limit": str(row.history_context_limit or 20),
         }[field]
@@ -690,7 +709,8 @@ class ConfigTui:
             details = [
                 f"group={selected.group_id or '<missing>'}",
                 f"repo={selected.repo or '<none>'}",
-                f"skill={selected.reply_skill or '<none>'} audit={'on' if selected.codex_audit_session_dir else 'off'}",
+                f"repos={', '.join(selected.repos) if selected.repos else '<none>'}",
+                f"skill={selected.reply_skill or '<none>'} audit={'on' if selected.codex_audit_session_dir else 'off'} owner={len(selected.approval_senders)}",
                 f"query={selected.query or '<none>'}",
                 "listeners=" + " | ".join(consume_preview(selected)),
             ]

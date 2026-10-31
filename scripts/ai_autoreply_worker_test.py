@@ -125,6 +125,16 @@ class AutoReplyWorkerTest(unittest.TestCase):
             self.assertIn("已加载回复 Skill: laoxing-test", system)
             self.assertIn("老邢测试 Skill", system)
 
+    def test_laoxing_reply_skill_loads_community_promo_reference(self):
+        skill_path = pathlib.Path.home() / ".codex" / "skills" / "laoxing" / "SKILL.md"
+        if not skill_path.exists():
+            self.skipTest("local laoxing skill not available")
+
+        context = worker.load_reply_skill_context("laoxing", str(skill_path), 50000)
+
+        self.assertTrue(any(path.endswith("community-promo-copy.md") for path in context.files))
+        self.assertIn("老邢社群推广/版本发布文案", context.content)
+
     def test_clip_reply(self):
         self.assertEqual(worker.clip_reply("abcdef", 4), "abcd...")
         self.assertEqual(worker.clip_reply("abcdef", 0), "abcdef")
@@ -350,6 +360,57 @@ class AutoReplyWorkerTest(unittest.TestCase):
             self.assertEqual(groups[0].project, "crawshrimp")
             self.assertEqual(groups[0].ready_message, "我在了")
 
+    def test_load_agent_config_parses_group_system_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "config.json"
+            path.write_text(json.dumps({
+                "groups": [
+                    {
+                        "name": "抓虾反馈群",
+                        "group": "cid-crawshrimp",
+                        "system_prompt": "你是抓虾产品用户体验官。",
+                    },
+                ],
+            }), encoding="utf-8")
+
+            _defaults, groups = worker.load_agent_config(path)
+            args = worker.args_for_group(self.parse(["--config", "config.json"]), {}, groups[0])
+
+            self.assertEqual(groups[0].system_prompt, "你是抓虾产品用户体验官。")
+            self.assertEqual(args.system_prompt, "你是抓虾产品用户体验官。")
+
+    def test_load_agent_config_parses_multiple_authorized_repos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "config.json"
+            crawshrimp = "/ABS/PATH/TO/crawshrimp"
+            harness = "/ABS/PATH/TO/crawshrimp-harness"
+            path.write_text(json.dumps({
+                "groups": [
+                    {
+                        "name": "抓虾联动群",
+                        "group": "cid-crawshrimp-training",
+                        "project": "crawshrimp",
+                        "repos": [crawshrimp, harness],
+                    },
+                ],
+            }), encoding="utf-8")
+
+            _defaults, groups = worker.load_agent_config(path)
+            args = worker.args_for_group(self.parse(["--config", "config.json"]), {}, groups[0])
+            prompt = worker.build_codex_session_prompt(
+                {"event_id": "event-1", "conversation_id": "cid-crawshrimp-training", "content": "抓虾 harness 帮我看下"},
+                worker.heuristic_classify({"content": "抓虾 harness 帮我看下"}, args),
+                args,
+            )
+
+            self.assertEqual(groups[0].repo, crawshrimp)
+            self.assertEqual(groups[0].repos, (crawshrimp, harness))
+            self.assertEqual(args.repo, crawshrimp)
+            self.assertEqual(args.repos, (crawshrimp, harness))
+            self.assertIn(crawshrimp, prompt)
+            self.assertIn(harness, prompt)
+            self.assertIn("不要读取其它本地项目目录", prompt)
+
     def test_load_agent_config_parses_reply_skill_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             skill_path = self.make_reply_skill(tmp)
@@ -509,7 +570,9 @@ class AutoReplyWorkerTest(unittest.TestCase):
                         "repo": "/ABS/PATH/TO/Listingify",
                         "code_write_policy": "approval_required",
                         "approval_phrases": ["OK", "好的", "继续", "确认", "可以"],
+                        "approval_senders": ["open-owner"],
                         "approval_ttl_minutes": 60,
+                        "requirements_skill": "grillme",
                     },
                 ],
             }), encoding="utf-8")
@@ -518,7 +581,9 @@ class AutoReplyWorkerTest(unittest.TestCase):
 
             self.assertEqual(groups[0].code_write_policy, "approval")
             self.assertEqual(groups[0].approval_phrases, ("OK", "好的", "继续", "确认", "可以"))
+            self.assertEqual(groups[0].approval_senders, ("open-owner",))
             self.assertEqual(groups[0].approval_ttl_minutes, 60)
+            self.assertEqual(groups[0].requirements_skill, "grillme")
 
     def test_approval_confirmation_matches_short_safe_phrases(self):
         args = self.parse(["--code-write-policy", "approval"])
@@ -759,6 +824,7 @@ class AutoReplyWorkerTest(unittest.TestCase):
     def test_autofix_requires_low_risk_bug_repo_tests_and_execute(self):
         args = self.parse([
             "--mode", "autofix",
+            "--code-write-policy", "auto",
             "--codex-execute",
             "--test-command", "python3 -m pytest",
         ])
@@ -772,7 +838,7 @@ class AutoReplyWorkerTest(unittest.TestCase):
             self.assertTrue(ok, reason)
 
     def test_autofix_blocks_high_risk_or_missing_tests(self):
-        args = self.parse(["--mode", "autofix", "--codex-execute"])
+        args = self.parse(["--mode", "autofix", "--codex-execute", "--code-write-policy", "auto"])
         with tempfile.TemporaryDirectory() as tmp:
             args.repo = tmp
             event = {"content": "明确 BUG：生产数据库删除报错", "message_id": "msg-risk"}
@@ -1097,6 +1163,7 @@ class AutoReplyWorkerTest(unittest.TestCase):
                 "--repo", tmp,
                 "--codex-execute",
                 "--code-write-policy", "approval",
+                "--approval-sender", "open-1",
                 "--approval-dir", str(pathlib.Path(tmp) / "approvals"),
             ])
             args.state_file = pathlib.Path(tmp) / "seen.jsonl"
@@ -1166,6 +1233,133 @@ class AutoReplyWorkerTest(unittest.TestCase):
             self.assertFalse(worker.pending_approval_path(args).exists())
             self.assertEqual(worker.load_seen(args.state_file), {"event-confirm"})
 
+    def test_approval_confirmation_ignores_unauthorized_sender_and_keeps_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.parse([
+                "--event-key", "user_im_message_receive_group",
+                "--group", "cid-listingify",
+                "--send",
+                "--reply-engine", "codex",
+                "--project", "listingify",
+                "--repo", tmp,
+                "--codex-execute",
+                "--code-write-policy", "approval",
+                "--approval-sender", "open-owner",
+                "--approval-dir", str(pathlib.Path(tmp) / "approvals"),
+            ])
+            args.state_file = pathlib.Path(tmp) / "seen.jsonl"
+            pending = {
+                "approval_id": "task-unauthorized",
+                "created_at": int(worker.time.time()),
+                "conversation_id": "cid-listingify",
+                "repo": tmp,
+                "event": {"content": "保存失败，帮忙修复"},
+                "classification": {
+                    "project": "listingify",
+                    "type": "bug",
+                    "confidence": 0.88,
+                    "needs_code": True,
+                    "risk": "low",
+                    "reply_draft": "收到。",
+                    "codex_task": {"repo": tmp},
+                },
+            }
+            worker.write_json_file(worker.pending_approval_path(args), pending)
+            event = {
+                "type": "user_im_message_receive_group",
+                "event_id": "event-confirm-other",
+                "message_id": "msg-confirm-other",
+                "conversation_id": "cid-listingify",
+                "sender": "同事",
+                "sender_open_dingtalk_id": "open-other",
+                "content": "可以",
+            }
+            previous_send = worker.send_reply
+            previous_run = worker.run_approved_code_change
+            worker.send_reply = lambda *_args, **_kwargs: self.fail("unauthorized approval must not send")
+            worker.run_approved_code_change = lambda *_args, **_kwargs: self.fail("unauthorized approval must not run code")
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    worker.process_event(event, set(), args)
+            finally:
+                worker.send_reply = previous_send
+                worker.run_approved_code_change = previous_run
+
+            record = json_loads_line(buf.getvalue())
+            self.assertEqual(record["action"], "code_approval_ignored_unauthorized_sender")
+            self.assertEqual(record["reason"], "approval_sender_not_allowed")
+            self.assertTrue(worker.pending_approval_path(args).exists())
+            self.assertEqual(worker.load_seen(args.state_file), {"event-confirm-other"})
+
+    def test_approval_confirmation_fails_closed_without_owner_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.parse([
+                "--event-key", "user_im_message_receive_group",
+                "--group", "cid-listingify",
+                "--code-write-policy", "approval",
+                "--approval-dir", str(pathlib.Path(tmp) / "approvals"),
+            ])
+            args.state_file = pathlib.Path(tmp) / "seen.jsonl"
+            worker.write_json_file(worker.pending_approval_path(args), {
+                "approval_id": "task-no-owner",
+                "created_at": int(worker.time.time()),
+                "repo": tmp,
+                "event": {"content": "保存失败，帮忙修复"},
+                "classification": {"type": "bug", "needs_code": True, "codex_task": {"repo": tmp}},
+            })
+            event = {
+                "type": "user_im_message_receive_group",
+                "event_id": "event-no-owner",
+                "message_id": "msg-no-owner",
+                "conversation_id": "cid-listingify",
+                "sender_open_dingtalk_id": "open-1",
+                "content": "OK",
+            }
+            previous_run = worker.run_approved_code_change
+            worker.run_approved_code_change = lambda *_args, **_kwargs: self.fail("approval must fail closed")
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    worker.process_event(event, set(), args)
+            finally:
+                worker.run_approved_code_change = previous_run
+
+            record = json_loads_line(buf.getvalue())
+            self.assertEqual(record["action"], "code_approval_ignored_unauthorized_sender")
+            self.assertEqual(record["reason"], "approval_sender_not_configured")
+            self.assertTrue(worker.pending_approval_path(args).exists())
+
+    def test_approval_sender_does_not_trust_display_name(self):
+        args = self.parse(["--code-write-policy", "approval", "--approval-sender", "老板"])
+        event = {
+            "sender": "老板",
+            "sender_open_dingtalk_id": "open-other",
+        }
+
+        allowed, reason = worker.approval_sender_allowed(event, {}, args)
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "approval_sender_not_allowed")
+
+    def test_failed_verification_delivery_keeps_publish_blocked(self):
+        result = worker.CodexBridgeResult(
+            task_id="approved-task",
+            status="failed",
+            task_dir="/tmp/task",
+            reason="verification_failed",
+            branch="codex/dingtalk/approved-task",
+            verification={"configured": True, "passed": False, "results": []},
+            last_message="FIXED: 改了保存逻辑。",
+            delivery_message="",
+        )
+
+        message = worker.build_approved_delivery_message(result)
+
+        self.assertIn("验证未通过", message)
+        self.assertIn("先别发布", message)
+        self.assertIn("未提交、未推送、未发布", message)
+
     def test_approval_only_listener_ignores_non_confirmation_group_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.parse([
@@ -1216,6 +1410,89 @@ class AutoReplyWorkerTest(unittest.TestCase):
             self.assertIn("workspace-write", cmd)
             self.assertIn("--cd", cmd)
             self.assertEqual(cmd[cmd.index("--cd") + 1], tmp)
+
+    def test_create_codex_task_worktree_uses_independent_branch(self):
+        if not worker.shutil.which("git"):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            for cmd in (
+                ["git", "init"],
+                ["git", "config", "user.email", "test@example.com"],
+                ["git", "config", "user.name", "Test User"],
+            ):
+                completed = worker.subprocess.run(cmd, cwd=repo, capture_output=True, text=True, check=False)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+            (repo / "README.md").write_text("hello\n", encoding="utf-8")
+            for cmd in (["git", "add", "README.md"], ["git", "commit", "-m", "initial"]):
+                completed = worker.subprocess.run(cmd, cwd=repo, capture_output=True, text=True, check=False)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+            args = self.parse([
+                "--repo", str(repo),
+                "--codex-worktree-dir", str(root / "worktrees"),
+                "--codex-branch-prefix", "codex/test",
+            ])
+
+            worktree_path, branch, repo_root = worker.create_codex_task_worktree(str(repo), "approved-task-1", args)
+            cmd = worker.build_approved_codex_command(args, root / "task", worktree_path)
+
+            self.assertEqual(pathlib.Path(repo_root).resolve(), repo.resolve())
+            self.assertEqual(branch, "codex/test/approved-task-1")
+            self.assertTrue((pathlib.Path(worktree_path) / "README.md").exists())
+            self.assertEqual(cmd[cmd.index("--cd") + 1], worktree_path)
+
+    def test_run_verification_commands_records_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = pathlib.Path(tmp) / "task"
+            task_dir.mkdir()
+
+            result = worker.run_verification_commands(
+                tmp,
+                ("python3 -c 'print(123)'", "python3 -c 'import sys; sys.exit(2)'"),
+                task_dir,
+                30,
+            )
+
+            self.assertTrue(result["configured"])
+            self.assertFalse(result["passed"])
+            self.assertEqual([item["returncode"] for item in result["results"]], [0, 2])
+            self.assertTrue((task_dir / "verify-1.stdout.log").exists())
+
+    def test_codex_prompts_include_grillme_requirement_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.parse([
+                "--repo", tmp,
+                "--requirements-skill", "grillme",
+                "--code-write-policy", "approval",
+            ])
+            event = {
+                "event_id": "event-feature",
+                "message_id": "msg-feature",
+                "conversation_id": "cid-1",
+                "content": "能不能加个批量发布前预检",
+            }
+            classification = worker.heuristic_classify(event, args)
+            prompt = worker.build_codex_prompt(event, classification, args)
+            approved = worker.build_approved_code_change_prompt(
+                {
+                    "approval_id": "task-1",
+                    "repo": tmp,
+                    "event": event,
+                    "classification": classification.to_dict(),
+                },
+                classification,
+                {"content": "OK"},
+                args,
+                worktree_path=str(pathlib.Path(tmp) / "wt"),
+                branch_name="codex/test/task-1",
+            )
+
+            self.assertIn("grillme", prompt)
+            self.assertIn("Requirement Confirmation", prompt)
+            self.assertIn("独立工作树", approved)
+            self.assertIn("NEEDS_INFO", approved)
 
 
 def json_loads_line(value):

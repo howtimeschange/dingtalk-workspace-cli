@@ -39,6 +39,7 @@ class AutoReplyConfigTuiTest(unittest.TestCase):
                     "codex_proactive_followup": True,
                     "codex_execute": True,
                     "code_write_policy": "approval",
+                    "approval_senders": ["open-owner"],
                     "enabled": True,
                 },
                 {
@@ -62,8 +63,10 @@ class AutoReplyConfigTuiTest(unittest.TestCase):
         self.assertIn("send", shein["permissions"])
         self.assertIn("codex-exec", shein["permissions"])
         self.assertIn("write:approval", shein["permissions"])
+        self.assertIn("owner:1", shein["permissions"])
         self.assertIn("hist:20", shein["permissions"])
         self.assertIn("audit", shein["permissions"])
+        self.assertEqual(tuple(shein["approval_senders"]), ("open-owner",))
 
     def test_duplicate_group_supports_same_project_multi_open_but_disables_clone(self):
         doc = self.sample_doc()
@@ -104,6 +107,15 @@ class AutoReplyConfigTuiTest(unittest.TestCase):
         self.assertFalse(rows[1].send)
         self.assertTrue(rows[1].history_context)
         self.assertEqual(rows[1].history_context_limit, 25)
+
+    def test_set_approval_senders_field_updates_model(self):
+        doc = self.sample_doc()
+
+        tui.set_group_field(doc, 0, "approval_senders", "open-a, open-b")
+        rows = tui.config_rows(doc)
+
+        self.assertEqual(rows[0].approval_senders, ("open-a", "open-b"))
+        self.assertIn("owner:2", rows[0].permissions)
 
     def test_save_writes_backup_and_summary_json_cli_reads_it(self):
         with tempfile.TemporaryDirectory() as tmp:

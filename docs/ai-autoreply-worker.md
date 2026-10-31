@@ -19,7 +19,17 @@ launchd/systemd/cron supervision.
   `codex_execute=true` / `--codex-execute`.
 - `guarded` starts Codex in `read-only` sandbox for assessment only.
 - `autofix` starts Codex in `workspace-write` sandbox only for low-risk,
-  high-confidence, confirmed BUGs with a configured repo and test command.
+  high-confidence, confirmed BUGs with a configured repo, test command, and
+  explicit `code_write_policy: "auto"`. `none` blocks automatic writes;
+  `approval` requires an owner confirmation for either reply engine.
+- `code_write_policy: "approval"` requires an explicit
+  `approval_senders` owner allowlist. If the allowlist is empty, confirmation
+  words fail closed: the pending approval stays pending and no code runs.
+- Approved code changes are developed in a separate git worktree under
+  `~/.dws/ai-autoreply/worktrees/` on a `codex/dingtalk/...` branch. The worker
+  never commits, pushes, deploys, or publishes automatically.
+- After Codex returns from an approved code task, the worker runs the configured
+  `test_commands` in that worktree and stores logs in the task bundle.
 - Each event is de-duplicated in `~/.dws/ai-autoreply/seen.jsonl`.
 - The worker keeps `dws event consume` stdin open and stops it with SIGTERM, so
   self-created personal subscriptions can be cleaned up by the existing event
@@ -75,6 +85,12 @@ one-question-one-answer flow: the worker sends a short acknowledgement, runs a
 read-only Codex review, then sends the diagnosis or confirmation request back
 to the group.
 
+Set `requirements_skill: "grillme"` to make code-oriented Codex prompts use a
+focused requirement-confirmation pass. Codex should first use the current
+message, recent chat context, docs/screenshots, and local code inspection; it
+only asks the group when business goals, boundaries, acceptance samples,
+priority, or risk trade-offs are still missing.
+
 ## Dry Run
 
 ### Config allowlist
@@ -97,6 +113,7 @@ Start from [`ai-autoreply-config.example.json`](ai-autoreply-config.example.json
     "reply_skill_path": "~/.codex/skills/laoxing/SKILL.md",
     "codex_audit_session_dir": "~/Documents/ChatGPT/钉钉分身会话",
     "codex_proactive_followup": false,
+    "requirements_skill": "grillme",
     "codex_execute": false
   },
   "groups": [
@@ -119,6 +136,8 @@ Start from [`ai-autoreply-config.example.json`](ai-autoreply-config.example.json
       "code_keywords": ["抓虾", "crawshrimp"],
       "query": "抓虾,AI视频,生图,鞋包,报错,不能用,需求",
       "test_commands": ["python3 -m pytest"],
+      "code_write_policy": "approval",
+      "approval_senders": ["openDingtalkId-or-userId-of-owner"],
       "enabled": true
     }
   ]
@@ -158,9 +177,9 @@ python3 scripts/ai_autoreply_config_tui.py \
 The TUI shows every configured group, including disabled groups, with project,
 strategy (`mode/trigger/reply_engine`), active listener count, and permissions
 such as send, Codex execution, write policy, history context, proactive
-follow-up, and audit mirroring. It also supports duplicating a group as a
-disabled copy, so the same project can be opened by multiple group avatars with
-different group IDs or policies.
+follow-up, audit mirroring, and `owner:N` for code-approval owners. It also
+supports duplicating a group as a disabled copy, so the same project can be
+opened by multiple group avatars with different group IDs or policies.
 
 Useful keys:
 
@@ -180,6 +199,11 @@ Useful keys:
 | `Enter` | edit text fields like group id, project, repo, skill, audit dir |
 | `v` | validate the config |
 | `S` | save atomically with a timestamped backup |
+
+Use `Enter` and edit `approval_senders` to set the comma-separated owner
+identities that may approve code changes. Prefer `openDingTalkId` from
+`dws contact user search --query "姓名" --format json`; `userId` is also
+accepted when that appears in event payloads.
 
 For non-interactive review:
 
@@ -248,6 +272,16 @@ Persistent group Codex session metadata and per-message logs are stored under:
 ```text
 ~/.dws/ai-autoreply/codex-sessions/<conversation_id>/
 ```
+
+Approved code-change worktrees are stored under:
+
+```text
+~/.dws/ai-autoreply/worktrees/<approved_task_id>/
+```
+
+The matching task bundle records `worktree.json`, Codex JSONL logs, and
+`verification.json` plus one stdout/stderr log pair per configured verification
+command.
 
 ## Automation Modes
 
@@ -398,3 +432,44 @@ bounded:
 
 This only handles messages received while the worker is running. For production
 auto-reply, launchd/systemd supervision is more reliable.
+
+
+## Durable dispatch and recovery
+
+The worker uses the inbox → policy snapshot → assignment checkpoint → outbox
+pattern described in [DeepSeek's Superagent research prototype](https://github.com/deepseek-ai/dsh-superagent-prototype).
+It keeps DWS personal IM transport and the existing owner/target/sandbox gates.
+It does not claim the prototype's entire ticket/conductor architecture.
+
+- SQLite defaults to `~/.dws/ai-autoreply/seen.sqlite3`, beside `--state-file`.
+  Override with `--runtime-db`. A process lock protects that database; WAL/FULL
+  and atomic private JSON writes make local transitions durable.
+- `--max-workers 3` allows up to three conversations at once. Each conversation
+  stays serial, including its main and approval-only listeners. A message ID
+  shared by both listeners is admitted once per profile/conversation.
+- Restart restores running jobs to queued, but unfinished execution steps and
+  in-flight sends become `unknown`. Completed step results are reused. An
+  unknown outcome is never automatically rerun or resent: inspect the task
+  worktree/logs or authoritative DingTalk receipt before operator reconciliation.
+  There is currently no reconciliation/retry CLI. Do not delete the database to retry.
+- Current policy must match the saved snapshot before queued work runs. Changed
+  authorization blocks the old job rather than using expanded permissions.
+- Pending approvals retain separate task IDs. If more than one is pending,
+  bare `OK` selects none; use `确认 dws-codex-<20 hex digits>`. Rejection and
+  informational questions are not consent. Legacy one-request JSON still loads.
+  TTL limits unstarted code, not delivery of an already completed result.
+- Both approved changes and automatic fixes use independent Git worktrees.
+  Configured host verification runs separately from Codex and its sandbox.
+  No configured tests means no worker-level verification claim.
+- Stop signals prevent new claims and preserve queued jobs. Active actions may
+  finish; a supervisor's forced exit leaves unknown outcomes for inspection.
+  An interrupted optional ready message is recorded without blocking startup.
+
+Read counts without starting listeners or modifying state:
+
+```bash
+python3 scripts/ai_autoreply_worker.py --runtime-status
+```
+
+The private database contains group events, responses and task data. Keep it out
+of Git. Local UUID deduplication is not a universal exactly-once delivery guarantee.

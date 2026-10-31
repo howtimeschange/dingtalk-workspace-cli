@@ -11,6 +11,7 @@
     "reply_skill_path": "~/.codex/skills/laoxing/SKILL.md",
     "codex_audit_session_dir": "~/Documents/ChatGPT/钉钉分身会话",
     "codex_proactive_followup": false,
+    "requirements_skill": "grillme",
     "classifier": "heuristic",
     "codex_execute": false
   },
@@ -36,6 +37,8 @@
       "code_keywords": ["抓虾", "crawshrimp"],
       "query": "抓虾,AI视频,生图,鞋包,报错,不能用,需求",
       "test_commands": ["python3 -m pytest"],
+      "code_write_policy": "approval",
+      "approval_senders": ["openDingtalkId-or-userId-of-owner"],
       "enabled": true
     },
     {
@@ -48,6 +51,8 @@
       "code_keywords": ["Listingify", "SHEIN"],
       "query": "SHEIN,上新,草稿,发布,类目,尺码,报错,需求",
       "test_commands": ["npm test"],
+      "code_write_policy": "approval",
+      "approval_senders": ["openDingtalkId-or-userId-of-owner"],
       "enabled": true
     },
     {
@@ -60,6 +65,8 @@
       "code_keywords": ["深绘", "deepdraw"],
       "query": "深绘,AI上新,建档,尺码表,图片,类目,报错,需求",
       "test_commands": ["npm test"],
+      "code_write_policy": "approval",
+      "approval_senders": ["openDingtalkId-or-userId-of-owner"],
       "enabled": true
     }
   ]
