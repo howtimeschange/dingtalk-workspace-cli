@@ -126,14 +126,16 @@ class AutoReplyWorkerTest(unittest.TestCase):
             self.assertIn("老邢测试 Skill", system)
 
     def test_laoxing_reply_skill_loads_community_promo_reference(self):
-        skill_path = pathlib.Path.home() / ".codex" / "skills" / "laoxing" / "SKILL.md"
-        if not skill_path.exists():
-            self.skipTest("local laoxing skill not available")
-
-        context = worker.load_reply_skill_context("laoxing", str(skill_path), 50000)
-
-        self.assertTrue(any(path.endswith("community-promo-copy.md") for path in context.files))
-        self.assertIn("老邢社群推广/版本发布文案", context.content)
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = self.make_reply_skill(tmp, name="laoxing")
+            references = skill_path.parent / "references"
+            references.mkdir()
+            (references / "community-promo-copy.md").write_text(
+                "fixture community release reference", encoding="utf-8",
+            )
+            context = worker.load_reply_skill_context("laoxing", str(skill_path), 50000)
+            self.assertTrue(any(path.endswith("community-promo-copy.md") for path in context.files))
+            self.assertIn("fixture community release reference", context.content)
 
     def test_clip_reply(self):
         self.assertEqual(worker.clip_reply("abcdef", 4), "abcd...")
@@ -602,7 +604,7 @@ class AutoReplyWorkerTest(unittest.TestCase):
         ])
         event = {
             "conversation_id": "cid-1",
-            "event_time": 1767196800000,
+            "event_time": int(worker.datetime(2026, 1, 1).timestamp() * 1000),
         }
 
         self.assertEqual(worker.build_history_context_command(event, args), [
